@@ -1716,6 +1716,122 @@
 const PFN_NAMES_KEY     = "pfn_names_pmdp_linxcat_v1";
   const MILESTONE_NAMES_KEY = "milestone_names_pmdp_linxcat_v1";
   const QUALITY_NAMES_KEY   = "quality_names_pdmp_linxcat_v1";
+
+  // --- Cloudflare API sync ---
+  const CF_API_BASE = "https://dashboard-db.enis-sahli-extern.workers.dev";
+  const CF_ITEMS_URL = `${CF_API_BASE}/api/items`;
+  const CF_TOKEN_STORAGE_KEY = "pfn_cf_api_token_v1";
+
+  function getApiToken(){
+    try{ return localStorage.getItem(CF_TOKEN_STORAGE_KEY) || ""; }catch{ return ""; }
+  }
+  function setApiToken(v){
+    try{ localStorage.setItem(CF_TOKEN_STORAGE_KEY, (v || "").trim()); }catch{}
+  }
+  function ensureApiToken(){
+    let t = getApiToken();
+    if(!t){
+      t = (prompt("Enter Cloudflare API token for Add / Edit / Delete:") || "").trim();
+      if(t) setApiToken(t);
+    }
+    return t;
+  }
+
+  function toApiRecord(r){
+    return {
+      family: r?.family ?? "",
+      project_name: r?.projectName ?? "",
+      gfe: r?.gfe ?? "",
+      plant_of_production: r?.plantOfProduction ?? "",
+      diversity: r?.diversity ?? "",
+      pfn_name: r?.pfnName ?? "",
+      pdmp_planning_date: r?.pmdpPlanning ?? "",
+      pdmp_delivery_date: r?.pmdpDelivery ?? "",
+      linxcat_planning_date: r?.linxPlanning ?? "",
+      linxcat_delivery_date: r?.linxDelivery ?? "",
+      milestone: r?.milestoneName ?? "",
+      mf_shared_date: r?.mfSharedDate ?? "",
+      mf_feedback: r?.mfFeedback ?? "",
+      dmu_quality: r?.dmuQuality ?? "",
+      linx_quality: r?.linxQuality ?? "",
+      delivery_status_auto: r?.deliveryStatus ?? "",
+      comment: r?.comment ?? ""
+    };
+  }
+
+  function fromApiRecord(r){
+    return normalizeRecord({
+      id: r?.id ?? null,
+      family: r?.family ?? "",
+      projectName: r?.project_name ?? "",
+      gfe: r?.gfe ?? "",
+      plantOfProduction: r?.plant_of_production ?? "",
+      diversity: r?.diversity ?? "",
+      pfnName: r?.pfn_name ?? "",
+      pmdpPlanning: r?.pdmp_planning_date ?? "",
+      pmdpDelivery: r?.pdmp_delivery_date ?? "",
+      linxPlanning: r?.linxcat_planning_date ?? "",
+      linxDelivery: r?.linxcat_delivery_date ?? "",
+      milestoneName: r?.milestone ?? "",
+      mfSharedDate: r?.mf_shared_date ?? "",
+      mfFeedback: r?.mf_feedback ?? "",
+      dmuQuality: r?.dmu_quality ?? "",
+      linxQuality: r?.linx_quality ?? "",
+      deliveryStatus: r?.delivery_status_auto ?? "",
+      comment: r?.comment ?? ""
+    });
+  }
+
+  async function apiGetItems(){
+    const r = await fetch(CF_ITEMS_URL, { method: "GET", cache: "no-store" });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j?.error || `GET failed (${r.status})`);
+    return Array.isArray(j?.items) ? j.items.map(fromApiRecord) : [];
+  }
+
+  async function apiCreateItem(rec){
+    const token = ensureApiToken();
+    if(!token) throw new Error("Missing API token.");
+    const r = await fetch(CF_ITEMS_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Token": token
+      },
+      body: JSON.stringify(toApiRecord(rec))
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.error || `POST failed (${r.status})`);
+    return j;
+  }
+
+  async function apiUpdateItem(id, rec){
+    const token = ensureApiToken();
+    if(!token) throw new Error("Missing API token.");
+    const r = await fetch(`${CF_ITEMS_URL}?id=${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Token": token
+      },
+      body: JSON.stringify(toApiRecord(rec))
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.error || `PUT failed (${r.status})`);
+    return j;
+  }
+
+  async function apiDeleteItem(id){
+    const token = ensureApiToken();
+    if(!token) throw new Error("Missing API token.");
+    const r = await fetch(`${CF_ITEMS_URL}?id=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "X-API-Token": token }
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.error || `DELETE failed (${r.status})`);
+    return j;
+  }
   const DEFAULT_QUALITIES = ["OK","KO","Open"];
   const DEFAULT_PROJECTS = [
     "FLEXEVAN -X8310/X8311",
@@ -1975,7 +2091,7 @@ const STATUS = {
 
   function normalizeRecord(r){
     return {
-      id: (r && (r.id ?? r.ID ?? r._id)) ?? null,
+      id: r?.id ?? null,
       family: r?.family ?? "",
       projectName: r?.projectName ?? "",
       diversity: r?.diversity ?? "",
@@ -2008,206 +2124,23 @@ mfSharedDate: r?.mfSharedDate ?? "",
     }
   }
 
-  // --- Shared storage (SharePoint file) ---
-  // Stores the same records for ALL users in a JSON file placed in the SAME SharePoint folder as this HTML.
-  const SHARED_DATA_FILENAME = "pfn_activity_dashboard_data.json";
-
-  function getFolderServerRelativeUrl(){
+  // --- Shared storage via Cloudflare Worker + D1 ---
+  async function loadSharedRecords(){
     try{
-      const path = decodeURIComponent(location.pathname || "");
-      const parts = path.split("/");
-      parts.pop(); // remove current file name
-      const folder = parts.join("/") || "/";
-      return folder.endsWith("/") ? folder.slice(0, -1) : folder;
+      return await apiGetItems();
     }catch{
-      // fallback: best effort
-      const p = (location.pathname || "").split("/");
-      p.pop();
-      return p.join("/");
+      return [];
     }
   }
 
-  function getSharedFileServerRelativeUrl(){
-    const folder = getFolderServerRelativeUrl();
-    return (folder ? folder : "") + "/" + SHARED_DATA_FILENAME;
-  }
-
-  let __spDigest = null;
-  let __spDigestExp = 0;
-
-  async function getSharePointDigest(){
-    const now = Date.now();
-    if(__spDigest && now < (__spDigestExp - 30_000)) return __spDigest;
-
-    const r = await fetch("/_api/contextinfo", {
-      method: "POST",
-      headers: {
-        "Accept": "application/json;odata=verbose",
-        "Content-Type": "application/json;odata=verbose"
-      },
-      credentials: "same-origin"
-    });
-
-    const j = await r.json();
-    const info = j && j.d && j.d.GetContextWebInformation ? j.d.GetContextWebInformation : null;
-    __spDigest = info ? info.FormDigestValue : null;
-    // timeout is in seconds
-    const timeoutSec = info ? (info.FormDigestTimeoutSeconds || 1800) : 1800;
-    __spDigestExp = now + (// ================================
-// Cloudflare Worker API integration
-// ================================
-const API_BASE = "https://dashboard-db.enis-sahli-extern.workers.dev"; // no trailing slash
-const HARD_CODED_TOKEN = ""; // optional (not recommended). Leave empty to prompt once.
-const TOKEN_STORAGE_KEY = "PFN_DASHBOARD_API_TOKEN";
-
-function getApiToken(){
-  const hard = (HARD_CODED_TOKEN || "").trim();
-  if(hard) return hard;
-  try{
-    const saved = (localStorage.getItem(TOKEN_STORAGE_KEY) || "").trim();
-    if(saved) return saved;
-  }catch{}
-  return "";
-}
-
-function ensureApiToken(){
-  let t = getApiToken();
-  if(t) return t;
-  t = (window.prompt("Enter API token (stored locally in this browser):") || "").trim();
-  if(t){
-    try{ localStorage.setItem(TOKEN_STORAGE_KEY, t); }catch{}
-  }
-  return t;
-}
-
-function apiHeaders(needsWrite=false){
-  const h = { "Content-Type": "application/json" };
-  if(needsWrite){
-    const t = ensureApiToken();
-    if(t) h["X-API-Token"] = t;
-  }
-  return h;
-}
-
-function apiToRecord(item){
-  return normalizeRecord({
-    id: item?.id ?? null,
-    family: item?.family ?? "",
-    projectName: item?.project_name ?? "",
-    gfe: item?.gfe ?? "",
-    plantOfProduction: item?.plant_of_production ?? "",
-    diversity: item?.diversity ?? "",
-    pfnName: item?.pfn_name ?? "",
-
-    // NOTE: dashboard uses "pmdp*" (your UI naming). Worker uses "pdmp_*"
-    pmdpPlanning: item?.pdmp_planning_date ?? "",
-    pmdpDelivery: item?.pdmp_delivery_date ?? "",
-    linxcatPlanning: item?.linxcat_planning_date ?? "",
-    linxcatDelivery: item?.linxcat_delivery_date ?? "",
-
-    milestoneName: item?.milestone ?? "",
-    mfSharedDate: item?.mf_shared_date ?? "",
-    mfFeedback: item?.mf_feedback ?? "",
-    dmuQuality: item?.dmu_quality ?? "",
-    linxQuality: item?.linx_quality ?? "",
-    deliveryStatus: item?.delivery_status_auto ?? "",
-    comment: item?.comment ?? "",
-  });
-}
-
-function recordToApiPayload(r){
-  const rec = normalizeRecord(r);
-  return {
-    family: rec.family || null,
-    project_name: rec.projectName || null,
-    gfe: rec.gfe || null,
-    plant_of_production: rec.plantOfProduction || null,
-    diversity: rec.diversity || null,
-    pfn_name: rec.pfnName || null,
-
-    pdmp_planning_date: rec.pmdpPlanning || null,
-    pdmp_delivery_date: rec.pmdpDelivery || null,
-    linxcat_planning_date: rec.linxcatPlanning || null,
-    linxcat_delivery_date: rec.linxcatDelivery || null,
-
-    milestone: rec.milestoneName || null,
-    mf_shared_date: rec.mfSharedDate || null,
-    mf_feedback: rec.mfFeedback || null,
-
-    dmu_quality: rec.dmuQuality || null,
-    linx_quality: rec.linxQuality || null,
-    delivery_status_auto: rec.deliveryStatus || null,
-    comment: rec.comment || null,
-  };
-}
-
-async function apiGetAll(){
-  const r = await fetch(`${API_BASE}/api/items`, { method:"GET" });
-  const data = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data?.error || `GET /api/items failed (${r.status})`);
-  return (data?.items || []).map(apiToRecord);
-}
-
-async function apiCreate(rec){
-  const r = await fetch(`${API_BASE}/api/items`, {
-    method:"POST",
-    headers: apiHeaders(true),
-    body: JSON.stringify(recordToApiPayload(rec))
-  });
-  const data = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data?.error || `POST /api/items failed (${r.status})`);
-  return data;
-}
-
-async function apiUpdate(id, rec){
-  const r = await fetch(`${API_BASE}/api/items?id=${encodeURIComponent(id)}`, {
-    method:"PUT",
-    headers: apiHeaders(true),
-    body: JSON.stringify(recordToApiPayload(rec))
-  });
-  const data = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data?.error || `PUT /api/items failed (${r.status})`);
-  return data;
-}
-
-async function apiDelete(id){
-  const r = await fetch(`${API_BASE}/api/items?id=${encodeURIComponent(id)}`, {
-    method:"DELETE",
-    headers: apiHeaders(true)
-  });
-  const data = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data?.error || `DELETE /api/items failed (${r.status})`);
-  return data;
-}
-
-// Keep same function name used by init()
-async function loadSharedRecords(){
-  try{
-    const serverRecords = await apiGetAll();
-    // cache for offline
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(serverRecords)); }catch{}
-    return serverRecords;
-  }catch(e){
-    console.warn("Cloudflare API not reachable, fallback to local storage:", e);
-    return [];
-  }
-}
-
-// Keep for compatibility (no bulk save in Worker)
-async function saveSharedRecords(_list){
-  return true;
-}
-
-catch{
-      // ignore (best effort)
-    }
+  async function saveSharedRecords(_list){
+    // Not used anymore: Add/Edit/Delete now call Cloudflare row CRUD directly.
+    return;
   }
 
   function persist(){
-    // keep local copy (fast UX) + sync to SharePoint file (shared for everyone)
+    // keep local copy only (fast UX cache)
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(records)); }catch{}
-    // fire-and-forget shared save
-    saveSharedRecords(records);
   }
 
   function loadProjectNames(){
@@ -2635,91 +2568,129 @@ mfSharedDate:"",
     }
   }
 
-  
-async function saveEntryOnly(){
-  const entry = getFormValues();
-
-  // optimistic local update (so UI feels instant)
-  records.push(entry);
-  persist();
-  refreshTable();
-  closeConfirmModal();
-
-  try{
-    await apiCreate(entry);
-    // reload from server to get DB IDs + canonical list
-    records = await apiGetAll();
-    persist();
-    refreshTable();
-    showToast("Saved to Cloudflare ✅");
-  }catch(e){
-    console.error(e);
-    showToast("Save failed: " + String(e.message || e));
-  }
-}
-
-
-async function saveChangesOnly(){
-  if(editingIndex===null) return;
-
-  const updated = getFormValues();
-  // preserve DB id if we already have it
-  const existing = records[editingIndex] || {};
-  if(existing && existing.id) updated.id = existing.id;
-
-  // optimistic local update
-  records[editingIndex] = normalizeRecord(updated);
-  persist();
-  refreshTable();
-  closeConfirmModal();
-
-  try{
-    if(existing && existing.id){
-      await apiUpdate(existing.id, updated);
-    }else{
-      // if there is no id (old local item), create it instead
-      await apiCreate(updated);
+  async function saveEntryOnly(){
+    const entry = getFormValues();
+    if(!entry.projectName){
+      alert("Project Name is required.");
+      return;
     }
-    records = await apiGetAll();
-    persist();
-    refreshTable();
-    showToast("Updated in Cloudflare ✅");
-  }catch(e){
-    console.error(e);
-    showToast("Update failed: " + String(e.message || e));
-  }finally{
-    editingIndex=null;
-  }
-}
-
-
-async function confirmDelete(){
-  if(deleteIndex===null) return;
-  const victim = records[deleteIndex];
-
-  // optimistic local delete
-  records.splice(deleteIndex, 1);
-  persist();
-  refreshTable();
-  closeConfirmModal();
-
-  try{
-    if(victim && victim.id){
-      await apiDelete(victim.id);
+    ensureProjectNameInList(entry.projectName);
+    try{
+      const res = await apiCreateItem(entry);
+      records.unshift(normalizeRecord({ ...entry, id: res?.id ?? null }));
+      persist();
+      applyAutoCompact();
+      refreshAll();
+      showToast("Project line created.","success");
+      clearForm();
+    }catch(e){
+      showToast(String(e?.message || e || "Save failed."), "error");
     }
-    records = await apiGetAll();
-    persist();
-    refreshTable();
-    showToast("Deleted ✅");
-  }catch(e){
-    console.error(e);
-    showToast("Delete failed: " + String(e.message || e));
-  }finally{
-    deleteIndex=null;
   }
-}
 
-function closeConfirmModal(){
+  function startEdit(index){
+    const item = records[index];
+    if(!item) return;
+    editingIndex = index;
+    setFormValues(item);
+    showEditMode(true);
+
+    // Open Indicators drawer for fast editing (no layout changes)
+    try{ window.openIndicatorsPanel && window.openIndicatorsPanel(); }catch(e){}
+
+    // Scroll inside the drawer (not the whole page)
+    const pane = document.getElementById("capturePane");
+    try{ pane && pane.scrollTo({ top: 0, behavior: "smooth" }); }catch(e){}
+
+    // Focus a key field for instant editing
+    setTimeout(() => {
+      const el = document.getElementById("projectName") || document.getElementById("family");
+      try{ el && el.focus && el.focus(); }catch(e){}
+    }, 120);
+  }
+
+  async function saveChangesOnly(){
+    if(editingIndex === null) return;
+    const updated = getFormValues();
+    if(!updated.projectName){
+      alert("Project Name is required.");
+      return;
+    }
+    const current = records[editingIndex];
+    if(!current || !current.id){
+      showToast("Missing row id for update.", "error");
+      return;
+    }
+    ensureProjectNameInList(updated.projectName);
+    try{
+      await apiUpdateItem(current.id, updated);
+      records[editingIndex] = normalizeRecord({ ...updated, id: current.id });
+      persist();
+      applyAutoCompact();
+      editingIndex = null;
+      showEditMode(false);
+      refreshAll();
+      showToast("Project line updated.","success");
+      clearForm();
+    }catch(e){
+      showToast(String(e?.message || e || "Update failed."), "error");
+    }
+  }
+
+  function cancelEdit(){
+    editingIndex = null;
+    showEditMode(false);
+    clearForm();
+  }
+
+  function askDelete(index){
+    const item = records[index];
+    if(!item) return;
+    pendingDeleteIndex = index;
+    const msg = document.getElementById("confirmMessage");
+    const project = item.projectName ? `Project: "${item.projectName}"` : "Project: —";
+    const pfn = item.pfnName ? `PFN: "${item.pfnName}"` : "PFN: —";
+    const st = item.deliveryStatus ? `Status: "${item.deliveryStatus}"` : "Status: —";
+    msg.textContent = `Are you sure you want to delete this entry?\n\n${project}\n${pfn}\n${st}`;
+    openConfirmModal();
+  }
+
+  async function confirmDelete(){
+    if(pendingDeleteIndex === null) return;
+    const index = pendingDeleteIndex;
+    pendingDeleteIndex = null;
+    const item = records[index];
+    if(!item || !item.id){
+      showToast("Missing row id for delete.", "error");
+      return;
+    }
+    try{
+      await apiDeleteItem(item.id);
+      records.splice(index, 1);
+      persist();
+      applyAutoCompact();
+      if(editingIndex !== null){
+        if(editingIndex === index){
+          editingIndex = null;
+          showEditMode(false);
+          clearForm();
+        } else if(editingIndex > index){
+          editingIndex -= 1;
+        }
+      }
+      refreshAll();
+      showToast("Project line deleted.","success");
+    }catch(e){
+      showToast(String(e?.message || e || "Delete failed."), "error");
+    }
+  }
+
+  function openConfirmModal(){
+    const backdrop = document.getElementById("confirmBackdrop");
+    backdrop.style.display = "flex";
+    backdrop.setAttribute("aria-hidden", "false");
+  }
+  function closeConfirmModal(){
     const backdrop = document.getElementById("confirmBackdrop");
     backdrop.style.display = "none";
     backdrop.setAttribute("aria-hidden", "true");
@@ -3957,4 +3928,3 @@ applyAutoCompact();
 
 </body>
 </html>
-
