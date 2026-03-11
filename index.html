@@ -1722,8 +1722,29 @@ const PFN_NAMES_KEY     = "pfn_names_pmdp_linxcat_v1";
   const CF_ITEMS_URL = `${CF_API_BASE}/api/items`;
   const CF_LISTS_URL = `${CF_API_BASE}/api/lists`;
   const CF_TOKEN_STORAGE_KEY = "pfn_cf_api_token_v1";
-  let sharedNameLists = null;
-  let sharedListsSyncTimer = null;
+
+  const SHARED_LIST_MAP = {
+    [PROJECT_NAMES_KEY]: "project_names",
+    [PLANT_NAMES_KEY]: "plant_names",
+    [GFE_NAMES_KEY]: "gfe_names",
+    [PFN_NAMES_KEY]: "pfn_names",
+    [MILESTONE_NAMES_KEY]: "milestone_names"
+  };
+
+  function getSharedListName(storageKey){
+    return SHARED_LIST_MAP[storageKey] || null;
+  }
+
+  function uniqueValues(values){
+    const map = new Map();
+    (values || []).forEach(v => {
+      const raw = String(v || "").trim();
+      if(!raw) return;
+      const key = raw.toLowerCase();
+      if(!map.has(key)) map.set(key, raw);
+    });
+    return [...map.values()];
+  }
 
   function getApiToken(){
     try{ return localStorage.getItem(CF_TOKEN_STORAGE_KEY) || ""; }catch{ return ""; }
@@ -1836,86 +1857,58 @@ const PFN_NAMES_KEY     = "pfn_names_pmdp_linxcat_v1";
     return j;
   }
 
-  function normalizeSharedList(values, defaults = []){
-    const map = new Map();
-    [...(defaults || []), ...(Array.isArray(values) ? values : [])].forEach(v => {
-      const s = String(v || "").trim();
-      if(!s) return;
-      const key = s.toLowerCase();
-      if(!map.has(key)) map.set(key, s);
+  async function apiGetSharedList(listName){
+    const r = await fetch(`${CF_LISTS_URL}/${encodeURIComponent(listName)}`, {
+      method: "GET",
+      cache: "no-store"
     });
-    return [...map.values()];
-  }
-
-  async function apiGetSharedLists(){
-    const r = await fetch(CF_LISTS_URL, { method: "GET", cache: "no-store" });
     const j = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j?.error || `GET lists failed (${r.status})`);
-    return j?.lists || {};
+    if(!r.ok) throw new Error(j?.error || `GET list failed (${r.status})`);
+    return Array.isArray(j?.values) ? uniqueValues(j.values) : [];
   }
 
-  async function apiPutSharedLists(lists){
+  async function apiPutSharedList(listName, values){
     const token = ensureApiToken();
     if(!token) throw new Error("Missing API token.");
-    const r = await fetch(CF_LISTS_URL, {
+    const r = await fetch(`${CF_LISTS_URL}/${encodeURIComponent(listName)}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
         "X-API-Token": token
       },
-      body: JSON.stringify({ lists })
+      body: JSON.stringify({ values: uniqueValues(values) })
     });
     const j = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j?.error || `PUT lists failed (${r.status})`);
+    if(!r.ok) throw new Error(j?.error || `PUT list failed (${r.status})`);
     return j;
   }
 
-  function getCurrentSharedListsPayload(){
-    return {
-      projectNames: Array.isArray(projectNames) ? projectNames : [],
-      plantNames: Array.isArray(plantNames) ? plantNames : [],
-      gfeNames: Array.isArray(gfeNames) ? gfeNames : [],
-      pfnNames: Array.isArray(pfnNames) ? pfnNames : [],
-      milestoneNames: Array.isArray(milestoneNames) ? milestoneNames : []
+  async function hydrateSharedLists(){
+    const defs = {
+      [PROJECT_NAMES_KEY]: DEFAULT_PROJECTS,
+      [PLANT_NAMES_KEY]: DEFAULT_PLANTS,
+      [GFE_NAMES_KEY]: DEFAULT_GFES,
+      [PFN_NAMES_KEY]: DEFAULT_PFNS,
+      [MILESTONE_NAMES_KEY]: DEFAULT_MILESTONES
     };
-  }
-
-  function scheduleSharedListsSync(){
-    try{
-      clearTimeout(sharedListsSyncTimer);
-      sharedListsSyncTimer = setTimeout(async () => {
-        try{
-          await apiPutSharedLists(getCurrentSharedListsPayload());
-          sharedNameLists = getCurrentSharedListsPayload();
-        }catch(err){
-          console.warn("Shared list sync failed:", err);
-        }
-      }, 150);
-    }catch{}
-  }
-
-  function ensureValueInArray(arr, value){
-    const s = String(value || "").trim();
-    if(!s) return arr;
-    const key = s.toLowerCase();
-    if((arr || []).some(v => String(v || "").trim().toLowerCase() === key)) return arr;
-    return [...(arr || []), s];
-  }
-
-  function syncListsFromRecord(rec){
-    if(!rec) return;
-    projectNames = ensureValueInArray(projectNames, rec.projectName);
-    gfeNames = ensureValueInArray(gfeNames, rec.gfe);
-    plantNames = ensureValueInArray(plantNames, rec.plantOfProduction);
-    pfnNames = ensureValueInArray(pfnNames, rec.pfnName);
-    milestoneNames = ensureValueInArray(milestoneNames, rec.milestoneName);
-
-    try{ localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(projectNames)); }catch{}
-    try{ localStorage.setItem(GFE_NAMES_KEY, JSON.stringify(gfeNames)); }catch{}
-    try{ localStorage.setItem(PLANT_NAMES_KEY, JSON.stringify(plantNames)); }catch{}
-    try{ localStorage.setItem(PFN_NAMES_KEY, JSON.stringify(pfnNames)); }catch{}
-    try{ localStorage.setItem(MILESTONE_NAMES_KEY, JSON.stringify(milestoneNames)); }catch{}
-    scheduleSharedListsSync();
+    const keys = Object.keys(SHARED_LIST_MAP);
+    await Promise.all(keys.map(async (storageKey) => {
+      const listName = getSharedListName(storageKey);
+      if(!listName) return;
+      let localVals = [];
+      try{
+        const raw = localStorage.getItem(storageKey);
+        if(raw) localVals = JSON.parse(raw) || [];
+      }catch{}
+      try{
+        const remoteVals = await apiGetSharedList(listName);
+        const merged = uniqueValues([...(defs[storageKey] || []), ...remoteVals]);
+        localStorage.setItem(storageKey, JSON.stringify(merged));
+      }catch{
+        const fallback = uniqueValues([...(defs[storageKey] || []), ...localVals]);
+        try{ localStorage.setItem(storageKey, JSON.stringify(fallback)); }catch{}
+      }
+    }));
   }
   const DEFAULT_QUALITIES = ["OK","KO","Open"];
   const DEFAULT_PROJECTS = [
@@ -2229,41 +2222,22 @@ mfSharedDate: r?.mfSharedDate ?? "",
   }
 
   function loadProjectNames(){
-    const remote = Array.isArray(sharedNameLists?.projectNames) ? sharedNameLists.projectNames : null;
-    let stored = [];
-    try{
-      const raw = localStorage.getItem(PROJECT_NAMES_KEY);
-      if(raw) stored = JSON.parse(raw);
-    }catch{}
-    return normalizeSharedList(remote ?? stored, DEFAULT_PROJECTS);
+    return loadNameList(PROJECT_NAMES_KEY, DEFAULT_PROJECTS);
   }
   function persistProjectNames(){
-    localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(projectNames));
-    scheduleSharedListsSync();
+    persistNameList(PROJECT_NAMES_KEY, projectNames);
   }
 
-
   function loadNameList(storageKey, defaults){
-    const remoteKeyMap = {
-      [PLANT_NAMES_KEY]: "plantNames",
-      [GFE_NAMES_KEY]: "gfeNames",
-      [PFN_NAMES_KEY]: "pfnNames",
-      [MILESTONE_NAMES_KEY]: "milestoneNames",
-      [QUALITY_NAMES_KEY]: "qualityNames"
-    };
-    const remoteKey = remoteKeyMap[storageKey];
-    const remote = remoteKey && Array.isArray(sharedNameLists?.[remoteKey]) ? sharedNameLists[remoteKey] : null;
     let stored = [];
     try{
       const raw = localStorage.getItem(storageKey);
       if(raw) stored = JSON.parse(raw);
     }catch{}
-    return normalizeSharedList(remote ?? stored, defaults || []);
+    return uniqueValues([...(defaults || []), ...(stored || [])]);
   }
 
-  
-  // Load list from storage using defaults only when nothing was saved yet.
-  // This keeps the UX consistent with "delete from dropdown list" (a deleted default stays deleted).
+  // Keep the original strict behavior for quality list only (local browser list)
   function loadNameListStrict(storageKey, defaults){
     let stored = null;
     try{
@@ -2271,40 +2245,29 @@ mfSharedDate: r?.mfSharedDate ?? "",
       if(raw) stored = JSON.parse(raw);
     }catch{}
     const base = Array.isArray(stored) ? stored : (defaults || []);
-    const map = new Map();
-    (base || []).forEach(v => {
-      if(!v) return;
-      const key = String(v).trim().toLowerCase();
-      if(!key) return;
-      if(!map.has(key)) map.set(key, String(v).trim());
-    });
-    return [...map.values()];
+    return uniqueValues(base);
   }
 
-function persistNameList(storageKey, arr){
-    localStorage.setItem(storageKey, JSON.stringify(arr || []));
-    scheduleSharedListsSync();
+  function persistNameList(storageKey, arr){
+    const next = uniqueValues(arr || []);
+    try{ localStorage.setItem(storageKey, JSON.stringify(next)); }catch{}
+    const sharedName = getSharedListName(storageKey);
+    if(sharedName){
+      apiPutSharedList(sharedName, next).catch(()=>{ /* keep UX smooth */ });
+    }
   }
 
   function addValueToList(storageKey, currentList, value){
-    const v = String(value || "").trim();
-    if(!v) return currentList;
-    const key = v.toLowerCase();
-    const map = new Map();
-    currentList.forEach(x => map.set(String(x).trim().toLowerCase(), String(x).trim()));
-    if(!map.has(key)) map.set(key, v);
-    const next = [...map.values()];
+    const next = uniqueValues([...(currentList || []), String(value || "").trim()]);
     persistNameList(storageKey, next);
     return next;
   }
 
   function removeValueFromList(storageKey, currentList, value){
-    const v = String(value || "").trim();
-    if(!v) return currentList;
-    const key = v.toLowerCase();
-    const next = (currentList || []).filter(x => String(x).trim().toLowerCase() !== key);
+    const v = String(value || "").trim().toLowerCase();
+    const next = (currentList || []).filter(x => String(x).trim().toLowerCase() !== v);
     persistNameList(storageKey, next);
-    return next;
+    return uniqueValues(next);
   }
 
   // Generic confirm (reuses the existing modal)
@@ -2545,7 +2508,7 @@ function initManagedCombos(){
     const total = records.length;
     document.getElementById("totalCount").textContent = String(total);
     document.getElementById("loadStatus").textContent =
-      total ? "Saved data loaded from this browser." : "No saved data yet.";
+      total ? "Saved data loaded." : "No saved data yet.";
   }
 
   function normalizedKey(value){
@@ -2658,7 +2621,6 @@ mfSharedDate:"",
       return;
     }
     ensureProjectNameInList(entry.projectName);
-    syncListsFromRecord(entry);
     try{
       const res = await apiCreateItem(entry);
       records.unshift(normalizeRecord({ ...entry, id: res?.id ?? null }));
@@ -2706,7 +2668,6 @@ mfSharedDate:"",
       return;
     }
     ensureProjectNameInList(updated.projectName);
-    syncListsFromRecord(updated);
     try{
       await apiUpdateItem(current.id, updated);
       records[editingIndex] = normalizeRecord({ ...updated, id: current.id });
@@ -3913,13 +3874,6 @@ window.addEventListener("load", async () => {
     enablePageScrollUX();
     initViewTools();
     initIndicatorsDrawer();
-
-    try{
-      sharedNameLists = await apiGetSharedLists();
-    }catch(e){
-      sharedNameLists = null;
-    }
-
     const shared = await loadSharedRecords();
     if(shared.length){
       records = shared;
@@ -3934,6 +3888,7 @@ window.addEventListener("load", async () => {
       }
     }
 applyAutoCompact();
+    await hydrateSharedLists();
     projectNames = loadProjectNames();
     buildProjectNameSelect("");
     document.getElementById("projectName").addEventListener("change", handleProjectSelectChange);
