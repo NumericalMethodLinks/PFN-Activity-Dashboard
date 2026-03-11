@@ -2504,6 +2504,33 @@ function initManagedCombos(){
     buildProjectNameSelect(trimmed);
   }
 
+  function ensureSharedValueInList(getList, setList, value){
+    const trimmed = String(value || "").trim();
+    if(!trimmed) return;
+    const exists = (getList() || []).some(v => String(v).trim().toLowerCase() === trimmed.toLowerCase());
+    if(!exists){
+      setList(addValueToList(setList.storageKey, getList(), trimmed));
+    }
+  }
+
+  function syncManagedFieldListsFromEntry(entry){
+    ensureProjectNameInList(entry?.projectName || "");
+
+    const setPlants = (v) => { plantNames = v; };
+    setPlants.storageKey = PLANT_NAMES_KEY;
+    const setGfe = (v) => { gfeNames = v; };
+    setGfe.storageKey = GFE_NAMES_KEY;
+    const setPfn = (v) => { pfnNames = v; };
+    setPfn.storageKey = PFN_NAMES_KEY;
+    const setMilestones = (v) => { milestoneNames = v; };
+    setMilestones.storageKey = MILESTONE_NAMES_KEY;
+
+    ensureSharedValueInList(() => gfeNames, setGfe, entry?.gfe || "");
+    ensureSharedValueInList(() => plantNames, setPlants, entry?.plantOfProduction || "");
+    ensureSharedValueInList(() => pfnNames, setPfn, entry?.pfnName || "");
+    ensureSharedValueInList(() => milestoneNames, setMilestones, entry?.milestoneName || "");
+  }
+
   function refreshCounters(){
     const total = records.length;
     document.getElementById("totalCount").textContent = String(total);
@@ -2620,7 +2647,7 @@ mfSharedDate:"",
       alert("Project Name is required.");
       return;
     }
-    ensureProjectNameInList(entry.projectName);
+    syncManagedFieldListsFromEntry(entry);
     try{
       const res = await apiCreateItem(entry);
       records.unshift(normalizeRecord({ ...entry, id: res?.id ?? null }));
@@ -2667,7 +2694,7 @@ mfSharedDate:"",
       showToast("Missing row id for update.", "error");
       return;
     }
-    ensureProjectNameInList(updated.projectName);
+    syncManagedFieldListsFromEntry(updated);
     try{
       await apiUpdateItem(current.id, updated);
       records[editingIndex] = normalizeRecord({ ...updated, id: current.id });
